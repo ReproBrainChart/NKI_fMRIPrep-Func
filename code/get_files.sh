@@ -69,5 +69,11 @@ move_tree_no_overwrite "${extract_dir}/${LEADING_DIR}" "."
 if [ -f "${subid}.html" ]; then
     mv "${subid}.html" "${subid}_${sesid}.html"
 fi
+if [ -f "${subid}_anat.html" ]; then
+    mv "${subid}_anat.html" "${subid}_${sesid}_anat.html"
+fi
+find . -maxdepth 1 -type f -name "${subid}_ses-*_func.html" \
+    ! -name "${subid}_${sesid}_func.html" -delete
 
 echo "get_files.fmriprep_func: unpacked ${zipbase}"
+
