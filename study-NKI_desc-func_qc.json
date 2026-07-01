@@ -1,0 +1,66 @@
+{
+    "file_name": {
+        "Description": "Name of the source QC linc_qc.tsv from XCP-D"
+    },
+    "sub": {
+        "Description": "Subject entity from the file_name"
+    },
+    "ses": {
+        "Description": "Session entity from the file_name"
+    },
+    "task": {
+        "Description": "Task entity from the file_name"
+    },
+    "acq": {
+        "Description": "Acquisition entity from the file_name"
+    },
+    "space": {
+        "Description": "Space entity from the file_name"
+    },
+    "den": {
+        "Description": "Density"
+    },
+    "fd_dvars_correlation_final": {
+        "Description": "Correlation between FD and DVARS after processing"
+    },
+    "fd_dvars_correlation_initial": {
+        "Description": "Correlation between FD and DVARS before processing"
+    },
+    "max_relative_rms": {
+        "Description": "Maximum relative root mean square"
+    },
+    "mean_dvars_final": {
+        "Description": "Mean DVARS after processing"
+    },
+    "mean_dvars_initial": {
+        "Description": "Mean DVARS before processing"
+    },
+    "mean_fd": {
+        "Description": "Mean framewise displacement"
+    },
+    "mean_fd_post_censoring": {
+        "Description": "Mean framewise displacement after censoring"
+    },
+    "mean_relative_rms": {
+        "Description": "Mean relative root mean square"
+    },
+    "median_fd_initial": {
+        "Description": "Median framewise displacement before censoring, computed from motion.tsv from fMRIPrep"
+    },
+    "motion_exclude": {
+        "Description": "Motion exclusion flag",
+        "Levels": {
+            "0": "median_fd_initial is less than or equal to the FD threshold 0.2",
+            "1": "median_fd_initial is greater than the FD threshold 0.2"
+        }
+    },
+    "num_censored_volumes": {
+        "Description": "Number of censored volumes"
+    },
+    "num_dummy_volumes": {
+        "Description": "Number of dummy volumes"
+    },
+    "num_retained_volumes": {
+        "Description": "Number of retained volumes"
+    }
+}
