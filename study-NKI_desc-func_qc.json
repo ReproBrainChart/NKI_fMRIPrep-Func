@@ -21,28 +21,44 @@
         "Description": "Density"
     },
     "fd_dvars_correlation_final": {
-        "Description": "Correlation between FD and DVARS after processing"
+        "Description": "The Pearson correlation coefficient between framewise displacement and DVARS (temporal derivative of root mean squared variance over voxels), after postprocessing. The FD time series is unfiltered, but censored. The DVARS time series is calculated from the denoised BOLD data.",
+        "LongName": "FD-DVARS Correlation After Postprocessing"
     },
     "fd_dvars_correlation_initial": {
-        "Description": "Correlation between FD and DVARS before processing"
+        "Description": "The Pearson correlation coefficient between framewise displacement and DVARS (temporal derivative of root mean squared variance over voxels), after removal of dummy volumes, but before removal of high-motion outliers.",
+        "LongName": "FD-DVARS Correlation Before Postprocessing"
     },
     "max_relative_rms": {
-        "Description": "Maximum relative root mean square"
+        "Description": "Maximum relative root mean squared calculated from motion parameters, after removal of dummy volumes and high-motion outliers. Relative in this case means 'relative to the previous scan'.",
+        "LongName": "Maximum Relative Root Mean Squared",
+        "Units": "arbitrary"
     },
     "mean_dvars_final": {
-        "Description": "Mean DVARS after processing"
+        "Description": "Average DVARS (temporal derivative of root mean squared variance over voxels) calculated from the denoised BOLD file.",
+        "LongName": "Mean DVARS After Postprocessing",
+        "TermURL": "https://doi.org/10.1016/j.neuroimage.2011.02.073"
     },
     "mean_dvars_initial": {
-        "Description": "Mean DVARS before processing"
+        "Description": "Average DVARS (temporal derivative of root mean squared variance over voxels) calculated from the preprocessed BOLD file, after dummy scan removal.",
+        "LongName": "Mean DVARS Before Postprocessing",
+        "TermURL": "https://doi.org/10.1016/j.neuroimage.2011.02.073"
     },
     "mean_fd": {
-        "Description": "Mean framewise displacement"
+        "Description": "Average framewise displacement without any motion parameter filtering. This value includes high-motion outliers, but not dummy volumes. FD is calculated according to the Power definition.",
+        "LongName": "Mean Framewise Displacement",
+        "Term URL": "https://doi.org/10.1016/j.neuroimage.2011.10.018",
+        "Units": "mm"
     },
     "mean_fd_post_censoring": {
-        "Description": "Mean framewise displacement after censoring"
+        "Description": "Average framewise displacement without any motion parameter filtering. This value does not include high-motion outliers or dummy volumes. FD is calculated according to the Power definition.",
+        "LongName": "Mean Framewise Displacement After Censoring",
+        "Term URL": "https://doi.org/10.1016/j.neuroimage.2011.10.018",
+        "Units": "mm"
     },
     "mean_relative_rms": {
-        "Description": "Mean relative root mean square"
+        "Description": "Average relative root mean squared calculated from motion parameters, after removal of dummy volumes and high-motion outliers. Relative in this case means 'relative to the previous scan'.",
+        "LongName": "Mean Relative Root Mean Squared",
+        "Units": "arbitrary"
     },
     "median_fd_initial": {
         "Description": "Median framewise displacement before censoring, computed from motion.tsv from fMRIPrep"
@@ -55,12 +71,15 @@
         }
     },
     "num_censored_volumes": {
-        "Description": "Number of censored volumes"
+        "Description": "The number of high-motion outlier volumes censored by XCP-D. This does not include dummy volumes.",
+        "LongName": "Number of Censored Volumes"
     },
     "num_dummy_volumes": {
-        "Description": "Number of dummy volumes"
+        "Description": "The number of non-steady state volumes removed from the time series by XCP-D.",
+        "LongName": "Number of Dummy Volumes"
     },
     "num_retained_volumes": {
-        "Description": "Number of retained volumes"
+        "Description": "The number of volumes retained in the denoised dataset. This does not include dummy volumes or high-motion outliers.",
+        "LongName": "Number of Retained Volumes"
     }
 }
