@@ -20,6 +20,9 @@ DSLOCKFILE="$4"     # shared lock file serializing git pushes
 INPUT_LAYOUT="${5:-zip}"
 FORCE_UPLOAD_PATHS="${FORCE_UPLOAD_PATHS:-}"
 SKIP_RESULT_PUSH="${SKIP_RESULT_PUSH:-0}"
+# Transient fcp-indi probe errors are retried this many times in total.
+FCPINDI_PROBE_ATTEMPTS="${FCPINDI_PROBE_ATTEMPTS:-3}"
+FCPINDI_PROBE_RETRY_SLEEP="${FCPINDI_PROBE_RETRY_SLEEP:-5}"
 
 case "${INPUT_LAYOUT}" in
     zip|bids)
@@ -115,7 +118,7 @@ probe_fcpindi_content() {
     local present_batch_file="$1"
     local missing_file="$2"
     local probe_errors_file="$3"
-    local check_stderr_file remote_uuid key path status size_status
+    local check_stderr_file remote_uuid key path status size_status attempt result detail
 
     remote_uuid=$(get_fcpindi_remote_uuid)
     : > "${present_batch_file}"
@@ -133,32 +136,49 @@ probe_fcpindi_content() {
             continue
         fi
 
-        : > "${check_stderr_file}"
-        if git annex checkpresentkey "${key}" fcp-indi >/dev/null 2>"${check_stderr_file}"; then
-            size_status=0
-            fcpindi_object_size_ok "${key}" 2>>"${check_stderr_file}" || size_status=$?
-            case "${size_status}" in
-                0)
-                    printf '%s %s 1\n' "${key}" "${remote_uuid}" >> "${present_batch_file}"
-                    ;;
-                1)
-                    cat "${check_stderr_file}" 1>&2
-                    printf '%s\n' "${path}" >> "${missing_file}"
-                    ;;
-                *)
-                    cat "${check_stderr_file}" >> "${probe_errors_file}"
-                    printf '%s\t%s\tsize probe failed\n' "${path}" "${key}" >> "${probe_errors_file}"
-                    ;;
-            esac
-        else
-            status=$?
-            if [ "${status}" -eq 1 ]; then
-                printf '%s\n' "${path}" >> "${missing_file}"
+        # Probe errors (network resets, timeouts) are retried; a definite
+        # "absent" or "wrong size" answer is not.
+        attempt=1
+        while :; do
+            : > "${check_stderr_file}"
+            result=error
+            if git annex checkpresentkey "${key}" fcp-indi >/dev/null 2>"${check_stderr_file}"; then
+                size_status=0
+                fcpindi_object_size_ok "${key}" 2>>"${check_stderr_file}" || size_status=$?
+                case "${size_status}" in
+                    0) result=present ;;
+                    1) result=missing ;;
+                    *) detail="size probe failed" ;;
+                esac
             else
-                cat "${check_stderr_file}" >> "${probe_errors_file}"
-                printf '%s\t%s\tcheckpresentkey exited %s\n' "${path}" "${key}" "${status}" >> "${probe_errors_file}"
+                status=$?
+                if [ "${status}" -eq 1 ]; then
+                    result=missing
+                else
+                    detail="checkpresentkey exited ${status}"
+                fi
             fi
-        fi
+            if [ "${result}" != error ] || [ "${attempt}" -ge "${FCPINDI_PROBE_ATTEMPTS}" ]; then
+                break
+            fi
+            echo "WARNING: fcp-indi probe of ${key} failed (${detail}); retry ${attempt}/$((FCPINDI_PROBE_ATTEMPTS - 1))." 1>&2
+            attempt=$((attempt + 1))
+            sleep "${FCPINDI_PROBE_RETRY_SLEEP}"
+        done
+
+        case "${result}" in
+            present)
+                printf '%s %s 1\n' "${key}" "${remote_uuid}" >> "${present_batch_file}"
+                ;;
+            missing)
+                cat "${check_stderr_file}" 1>&2
+                printf '%s\n' "${path}" >> "${missing_file}"
+                ;;
+            *)
+                cat "${check_stderr_file}" >> "${probe_errors_file}"
+                printf '%s\t%s\t%s after %s attempt(s)\n' "${path}" "${key}" "${detail}" "${attempt}" >> "${probe_errors_file}"
+                ;;
+        esac
     done < <(git annex find --format='${key}\t${file}\n')
     rm -f "${check_stderr_file}"
 
