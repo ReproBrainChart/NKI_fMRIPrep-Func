@@ -17,6 +17,9 @@ BATCH_SIZE=1000
 BRANCH_DELETE_BATCH_SIZE=100
 REMOTE_REF_LOCK_STALE_MINUTES="${REMOTE_REF_LOCK_STALE_MINUTES:-10}"
 ANNEX_FSCK_JOBS="${ANNEX_FSCK_JOBS:-4}"
+FSCK_TRANSIENT_MAX_RETRIES="${FSCK_TRANSIENT_MAX_RETRIES:-4}"
+FSCK_TRANSIENT_RETRY_SLEEP_SECONDS="${FSCK_TRANSIENT_RETRY_SLEEP_SECONDS:-30}"
+FSCK_RETRY_PATH_BATCH_SIZE="${FSCK_RETRY_PATH_BATCH_SIZE:-1000}"
 MERGE_TMPDIR="${MERGE_TMPDIR:-/cbica/comp_space/pennlinc_rbc}"
 TMPD=""
 HAS_NEW_BRANCHES=0
@@ -555,7 +558,7 @@ write_affected_subses() {
     input_file="$1"
     output_file="$2"
 
-    grep -oE 'sub-[A-Za-z0-9]+_ses-[A-Za-z0-9]+' "${input_file}" | sort -u > "${output_file}" || true
+    grep -oE 'sub-[A-Za-z0-9]+(_ses-[A-Za-z0-9]+)?' "${input_file}" | sort -u > "${output_file}" || true
 }
 
 strip_origin_branch() {
@@ -978,21 +981,97 @@ handle_absent_content_for_resubmission() {
     fi
 }
 
-write_failed_fsck_paths() {
+classify_failed_fsck_paths() {
     failures_file="$1"
     failed_paths_file="$2"
-    raw_paths_file="${TMPD}/failed-fsck-paths.raw"
+    transient_paths_file="$3"
 
     : > "${failed_paths_file}"
+    : > "${transient_paths_file}"
     if [ ! -s "${failures_file}" ]; then
         return 0
     fi
 
-    sed -n \
-        -e 's/.*"file"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
-        -e 's/.*"input"[[:space:]]*:[[:space:]]*\["\([^"]*\)".*/\1/p' \
-        "${failures_file}" > "${raw_paths_file}" || true
-    LC_ALL=C sort -u "${raw_paths_file}" > "${failed_paths_file}"
+    python3 - "${failures_file}" "${failed_paths_file}" "${transient_paths_file}" <<'PY'
+import json
+import re
+import sys
+
+failures_file, failed_paths_file, transient_paths_file = sys.argv[1:4]
+
+transient_patterns = (
+    re.compile(r"\bstatusCode\s*=\s*(429|500|502|503|504)\b"),
+    re.compile(r"\b(Service Unavailable|Internal Server Error|Bad Gateway|Gateway Timeout|Too Many Requests)\b", re.I),
+    re.compile(r"\b(HttpExceptionRequest|timeout|timed out|temporar|connection reset|connection aborted|ConnectionFailure|ConnectionTimeout|TLS|network)\b", re.I),
+)
+missing_patterns = (
+    re.compile(r"\bstatusCode\s*=\s*404\b"),
+    re.compile(r"\b(NoSuchKey|Not Found)\b", re.I),
+)
+
+def get_path(record):
+    path = record.get("file")
+    if isinstance(path, str) and path:
+        return path
+    inputs = record.get("input")
+    if isinstance(inputs, list):
+        for candidate in inputs:
+            if isinstance(candidate, str) and candidate:
+                return candidate
+    return ""
+
+failed_paths = set()
+transient_paths = set()
+
+with open(failures_file, "r", encoding="utf-8", errors="replace") as f:
+    for raw_line in f:
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        path = get_path(record)
+        if not path:
+            continue
+
+        note = str(record.get("note", ""))
+        is_missing = any(p.search(note) for p in missing_patterns)
+        is_transient = (not is_missing) and any(p.search(note) for p in transient_patterns)
+        if is_transient:
+            transient_paths.add(path)
+        else:
+            failed_paths.add(path)
+
+# Any path with one non-transient failure should stay in failed_paths.
+transient_paths.difference_update(failed_paths)
+
+with open(failed_paths_file, "w", encoding="utf-8") as out_failed:
+    for path in sorted(failed_paths):
+        out_failed.write(path + "\n")
+
+with open(transient_paths_file, "w", encoding="utf-8") as out_transient:
+    for path in sorted(transient_paths):
+        out_transient.write(path + "\n")
+PY
+}
+
+ensure_valid_fsck_retry_config() {
+    case "${FSCK_TRANSIENT_MAX_RETRIES}" in
+        ''|*[!0-9]*)
+            echo "WARNING: FSCK_TRANSIENT_MAX_RETRIES must be a non-negative integer; using 2." 1>&2
+            FSCK_TRANSIENT_MAX_RETRIES=2
+            ;;
+    esac
+
+    case "${FSCK_TRANSIENT_RETRY_SLEEP_SECONDS}" in
+        ''|*[!0-9]*)
+            echo "WARNING: FSCK_TRANSIENT_RETRY_SLEEP_SECONDS must be a non-negative integer; using 30." 1>&2
+            FSCK_TRANSIENT_RETRY_SLEEP_SECONDS=30
+            ;;
+    esac
 }
 
 print_fcpindi_resubmit_guidance() {
@@ -1001,7 +1080,7 @@ print_fcpindi_resubmit_guidance() {
 
     if [ -s "${resubmit_file}" ]; then
         echo "Re-run affected jobs with:" 1>&2
-        echo "  sbatch --array=1-\$(wc -l < code/merge-fsck-repair/resubmit-subses.txt)%${THROTTLE} code/submit_array.sh code/merge-fsck-repair/resubmit-subses.txt" 1>&2
+        echo "  bash code/submit_jobs.sh code/merge-fsck-repair/resubmit-subses.txt   # add --local [--n-cpus 8] to run without SLURM" 1>&2
     else
         echo "No subject-session IDs could be extracted for automatic resubmission." 1>&2
         echo "Inspect ${report_dir}/ and repair or resubmit the affected data manually." 1>&2
@@ -1014,8 +1093,20 @@ handle_failed_fsck_for_resubmission() {
     report_dir="../code/merge-fsck-repair"
     failures_file="${report_dir}/fsck-${fsck_label}-failures.jsonl"
     failed_paths_file="${report_dir}/content-absent-from-fsck-${fsck_label}.txt"
+    transient_paths_file="${report_dir}/transient-fsck-${fsck_label}.txt"
 
-    write_failed_fsck_paths "${failures_file}" "${failed_paths_file}"
+    classify_failed_fsck_paths "${failures_file}" "${failed_paths_file}" "${transient_paths_file}"
+    if [ -s "${transient_paths_file}" ]; then
+        append_run_summary "fsck failure classification (${fsck_label}): transient/transport failures $(wc -l < "${transient_paths_file}"); report ${transient_paths_file}."
+    fi
+
+    if [ -s "${transient_paths_file}" ] && [ ! -s "${failed_paths_file}" ]; then
+        echo "WARNING: fsck ${fsck_label} failed only due to transient ${annex_remote} probe errors." 1>&2
+        echo "Transient failure paths: ${transient_paths_file}" 1>&2
+        echo "No job branches will be deleted unless fsck shows non-transient failures." 1>&2
+        return 2
+    fi
+
     if [ ! -s "${failed_paths_file}" ]; then
         return 0
     fi
@@ -1024,6 +1115,78 @@ handle_failed_fsck_for_resubmission() {
     echo "Failed content paths: ${failed_paths_file}" 1>&2
     handle_absent_content_for_resubmission "${failed_paths_file}" "${report_dir}"
     print_fcpindi_resubmit_guidance "${report_dir}"
+    return 1
+}
+
+retry_transient_fsck_paths() {
+    fsck_label="$1"
+    initial_transient_paths_file="$2"
+    current_paths_file="${initial_transient_paths_file}"
+    attempt=0
+    max_retries="${FSCK_TRANSIENT_MAX_RETRIES}"
+
+    ensure_valid_fsck_retry_config
+    if [ ! -s "${current_paths_file}" ]; then
+        return 0
+    fi
+
+    case "${FSCK_RETRY_PATH_BATCH_SIZE}" in
+        ''|*[!0-9]*)
+            echo "WARNING: FSCK_RETRY_PATH_BATCH_SIZE must be a positive integer; using 1000." 1>&2
+            FSCK_RETRY_PATH_BATCH_SIZE=1000
+            ;;
+        0)
+            echo "WARNING: FSCK_RETRY_PATH_BATCH_SIZE must be greater than 0; using 1000." 1>&2
+            FSCK_RETRY_PATH_BATCH_SIZE=1000
+            ;;
+    esac
+
+    if [ "${max_retries}" -eq 0 ]; then
+        echo "ERROR: fsck ${fsck_label} has transient-only failures, but FSCK_TRANSIENT_MAX_RETRIES=0." 1>&2
+        rollback_local_merge_to_output_main
+        return 1
+    fi
+
+    while [ "${attempt}" -lt "${max_retries}" ]; do
+        retry_count=$(wc -l < "${current_paths_file}")
+        attempt=$((attempt + 1))
+        retry_label="${fsck_label}-transient-retry-${attempt}"
+        echo "WARNING: retrying fsck ${fsck_label} for ${retry_count} transient path(s) (${attempt}/${max_retries})." 1>&2
+        append_run_summary "fsck retry (${fsck_label}): retrying ${retry_count} transient path(s) (${attempt}/${max_retries})."
+
+        fsck_status=0
+        run_annex_fast_fsck_with_summary_for_paths "${retry_label}" "${current_paths_file}" || fsck_status=$?
+        if [ "${fsck_status}" -eq 0 ]; then
+            append_run_summary "fsck retry (${fsck_label}): transient path retries passed on attempt ${attempt}/${max_retries}."
+            return 0
+        fi
+
+        handle_status=0
+        handle_failed_fsck_for_resubmission "${retry_label}" || handle_status=$?
+        if [ "${handle_status}" -eq 1 ]; then
+            # Non-transient failures were handled (delete + rollback) already.
+            return 1
+        fi
+        if [ "${handle_status}" -ne 2 ]; then
+            echo "ERROR: fsck ${retry_label} failed, but failure records could not be classified safely." 1>&2
+            rollback_local_merge_to_output_main
+            return 1
+        fi
+
+        if [ "${attempt}" -ge "${max_retries}" ]; then
+            break
+        fi
+
+        current_paths_file="../code/merge-fsck-repair/transient-fsck-${retry_label}.txt"
+        echo "WARNING: transient fsck failures remain after attempt ${attempt}/${max_retries}; waiting ${FSCK_TRANSIENT_RETRY_SLEEP_SECONDS}s before retry." 1>&2
+        append_run_summary "fsck retry (${fsck_label}): transient failures remain after attempt ${attempt}/${max_retries}; waiting ${FSCK_TRANSIENT_RETRY_SLEEP_SECONDS}s."
+        sleep "${FSCK_TRANSIENT_RETRY_SLEEP_SECONDS}"
+    done
+
+    echo "ERROR: fsck ${fsck_label} transient retries exhausted after ${max_retries} attempt(s)." 1>&2
+    echo "No result branches were deleted; rolling back local pseudo merge for a safe rerun." 1>&2
+    append_run_summary "fsck retry (${fsck_label}): transient retries exhausted after ${max_retries} attempt(s); rollback applied."
+    rollback_local_merge_to_output_main
     return 1
 }
 
@@ -1199,44 +1362,79 @@ print_annex_fast_fsck_result() {
     fi
 }
 
-run_annex_fast_fsck_with_summary() {
+run_annex_fast_fsck_with_summary_for_paths() {
     fsck_label="$1"
+    paths_file="${2:-}"
     fsck_status=0
     fsck_log="${TMPD}/fsck-${fsck_label}.jsonl"
 
-    git annex fsck --fast -J "${ANNEX_FSCK_JOBS}" -f "${annex_remote}" \
-        --json --json-error-messages > "${fsck_log}" 2>&1 || fsck_status=$?
+    : > "${fsck_log}"
+    if [ -n "${paths_file}" ] && [ -s "${paths_file}" ]; then
+        chunk_prefix="${TMPD}/__fsck_${fsck_label}_"
+        awk -v batch_size="${FSCK_RETRY_PATH_BATCH_SIZE}" -v prefix="${chunk_prefix}" '
+            $0 != "" {
+                chunk = int((NR - 1) / batch_size)
+                print > sprintf("%s%06d", prefix, chunk)
+            }
+        ' "${paths_file}"
+
+        fsck_batch_status=0
+        for chunk in "${chunk_prefix}"*; do
+            if [ ! -s "${chunk}" ]; then
+                continue
+            fi
+
+            mapfile -t fsck_paths < "${chunk}"
+            if [ "${#fsck_paths[@]}" -eq 0 ]; then
+                continue
+            fi
+
+            fsck_batch_status=0
+            git annex fsck --fast -J "${ANNEX_FSCK_JOBS}" -f "${annex_remote}" \
+                --json --json-error-messages -- "${fsck_paths[@]}" >> "${fsck_log}" 2>&1 || fsck_batch_status=$?
+            if [ "${fsck_batch_status}" -ne 0 ]; then
+                fsck_status="${fsck_batch_status}"
+            fi
+        done
+        rm -f "${chunk_prefix}"*
+    else
+        git annex fsck --fast -J "${ANNEX_FSCK_JOBS}" -f "${annex_remote}" \
+            --json --json-error-messages > "${fsck_log}" 2>&1 || fsck_status=$?
+    fi
+
     print_annex_fast_fsck_result "${fsck_label}" "${fsck_status}" "${fsck_log}"
     return "${fsck_status}"
 }
 
+run_annex_fast_fsck_with_summary() {
+    fsck_label="$1"
+    run_annex_fast_fsck_with_summary_for_paths "${fsck_label}" ""
+}
+
 run_final_fast_fsck() {
+    report_dir="../code/merge-fsck-repair"
+    transient_before_file="${report_dir}/transient-fsck-before-repair.txt"
+
     echo "Running final fast fsck against ${annex_remote} before pushing merged history."
     if run_annex_fast_fsck_with_summary "before-repair"; then
         return 0
     fi
 
-    echo "WARNING: final fast fsck failed; checking failed records before probing missing records." 1>&2
-    if ! handle_failed_fsck_for_resubmission "before-repair"; then
+    handle_status=0
+    handle_failed_fsck_for_resubmission "before-repair" || handle_status=$?
+    if [ "${handle_status}" -eq 1 ]; then
+        # Non-transient failures were handled (delete + rollback).
+        exit 1
+    fi
+    if [ "${handle_status}" -ne 2 ]; then
+        echo "ERROR: final fsck failed, but failure records were not classified safely." 1>&2
+        rollback_local_merge_to_output_main
         exit 1
     fi
 
-    echo "WARNING: probing missing records once before deciding whether jobs must be rerun." 1>&2
-    if ! repair_missing_fcpindi_records probe; then
+    if ! retry_transient_fsck_paths "before-repair" "${transient_before_file}"; then
         exit 1
     fi
-
-    fsck_status=0
-    run_annex_fast_fsck_with_summary "after-repair" || fsck_status=$?
-    if [ "${fsck_status}" -ne 0 ]; then
-        if ! handle_failed_fsck_for_resubmission "after-repair"; then
-            exit 1
-        fi
-        echo "ERROR: final git annex fsck --fast -f ${annex_remote} failed after repair." 1>&2
-        echo "No merged Git or git-annex history was pushed. Inspect the fsck output above and reports under code/merge-fsck-repair/." 1>&2
-        exit "${fsck_status}"
-    fi
-
 }
 
 push_reconciled_history() {
@@ -1274,7 +1472,7 @@ if [ "${MISSING_JOBS}" -gt 0 ]; then
         append_run_summary "Missing jobs: ${MISSING_JOBS} job(s) still missing; resubmission required before merging."
         echo "ERROR: ${MISSING_JOBS} job(s) still missing. Resubmit before merging." 1>&2
         echo "Run:" 1>&2
-        echo "  sbatch --array=1-${MISSING_JOBS}%${THROTTLE} code/submit_array.sh code/missing.txt" 1>&2
+        echo "  bash code/submit_jobs.sh code/missing.txt   # add --local [--n-cpus 8] to run without SLURM" 1>&2
         exit 1
     fi
 

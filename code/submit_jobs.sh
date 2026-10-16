@@ -26,6 +26,7 @@ LOCAL=0
 N_CPUS=8
 WORKDIR="${TMPDIR:-/cbica/comp_space/pennlinc_rbc}"
 PARAMS_FILE="code/all_subses.txt"
+PARAMS_GIVEN=0
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --local)
@@ -50,6 +51,7 @@ while [ "$#" -gt 0 ]; do
             ;;
         *)
             PARAMS_FILE="$1"
+            PARAMS_GIVEN=1
             ;;
     esac
     shift
@@ -70,7 +72,29 @@ if [ ! -f "${PARAMS_FILE}" ]; then
     echo "ERROR: params file not found: ${PARAMS_FILE}" 1>&2
     exit 1
 fi
-N=$(wc -l < "${PARAMS_FILE}" | tr -d ' ')
+
+# Repair runs must name the units to rerun; never fall back to every unit.
+# Jobs read FORCE_UPLOAD_PATHS after changing into their own clone, so pass an
+# absolute path.
+if [ -n "${FORCE_UPLOAD_PATHS:-}" ]; then
+    if [ "${PARAMS_GIVEN}" -eq 0 ]; then
+        echo "ERROR: FORCE_UPLOAD_PATHS is set; pass the params file listing the units to repair." 1>&2
+        exit 1
+    fi
+    if [ ! -s "${FORCE_UPLOAD_PATHS}" ]; then
+        echo "ERROR: FORCE_UPLOAD_PATHS is empty or unreadable: ${FORCE_UPLOAD_PATHS}" 1>&2
+        exit 1
+    fi
+    case "${FORCE_UPLOAD_PATHS}" in
+        /*) ;;
+        *) FORCE_UPLOAD_PATHS="${PWD}/${FORCE_UPLOAD_PATHS}" ;;
+    esac
+    export FORCE_UPLOAD_PATHS
+fi
+
+# Count rows like submit_array.sh reads them (sed -n Np), including a last line
+# without a trailing newline.
+N=$(awk 'END { print NR }' "${PARAMS_FILE}")
 if [ "${N}" -eq 0 ]; then
     echo "Nothing to run: ${PARAMS_FILE} is empty."
     exit 0
@@ -85,6 +109,8 @@ fi
 # participant_job.sh names its result branch after the SLURM array IDs and works
 # in TMPDIR, so provide both. Each job makes its own <workdir>/<branch> dir.
 mkdir -p "${WORKDIR}" logs
+# Jobs cd into their clone and clean up via this path, so it must be absolute.
+WORKDIR=$(cd "${WORKDIR}" && pwd)
 RUN_ID="local-$(date +%Y%m%d%H%M%S)-$$"
 export RUN_ID WORKDIR PARAMS_FILE dssource pushgitremote DSLOCKFILE
 export INPUT_LAYOUT="${INPUT_LAYOUT:-zip}"

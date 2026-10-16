@@ -9,6 +9,7 @@
 set -e -u -x
 # shellcheck disable=SC1091
 source code/job_config.sh
+GITHUB_DESCRIPTION="${GITHUB_DESCRIPTION:-RBC ${PIPELINE} derivatives (AI2D release)}"
 
 if [ ! -d merge_ds ]; then
     echo "ERROR: merge_ds/ not found. Run code/merge.sh first." 1>&2
@@ -46,12 +47,14 @@ if [ "${current}" != "main" ]; then
 fi
 
 # Create the GitHub repo + sibling. --publish-depends fcp-indi ensures content
-# is on S3 before any future datalad push.
+# is on S3 before any future datalad push. The credential name is lowercase
+# because DataLad lowercases DATALAD_CREDENTIAL_GH_TOKEN into the config key
+# datalad.credential.gh.token; "GH" would miss it and fall back to the keyring.
 datalad create-sibling-github "${GITHUB_ORG_REPO}" \
-    -s github --private --credential GH \
+    -s github --private --credential gh \
     --existing reconfigure \
     --publish-depends fcp-indi \
-    --description "RBC ${PIPELINE} derivatives (AI2D release)"
+    --description "${GITHUB_DESCRIPTION}"
 
 # datalad push is unreliable on very large repos -- push the git refs directly.
 TMPD=$(mktemp -d)
